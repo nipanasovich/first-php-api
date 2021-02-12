@@ -13,8 +13,8 @@ class Task {
   private $_deadline;
   private $_completed;
 
-  public function __construct($id, $title, $description, $deadline, $completed) {
-    $this->setID($id);
+  public function __construct(?int $id, $title = null, $description = null, $deadline = null, $completed = 0) {
+    ($id !== null ? $this->setID($id) : false);
     $this->setTitle($title);
     $this->setDescription($description);
     $this->setDeadline($deadline);
@@ -41,7 +41,7 @@ class Task {
     return $this->_completed;
   }
 
-  public function setID($id) {
+  public function setID(int $id) {
     if ($id === null || !is_numeric($id) || $id <= 0 || $this->_id !== null) {
       throw new TaskException("Task ID error");
     }
@@ -66,14 +66,20 @@ class Task {
   }
 
   public function setDeadline($deadline) {
-    if ($deadline !== null && date_format(date_create_from_format(self::DATE_FORMAT, $deadline), self::DATE_FORMAT) !== $deadline) {
+    $date = date_create_from_format(self::DATE_FORMAT, $deadline);
+
+    if (!$date && $deadline !== null) {
+      throw new TaskException("Wrong date format. Must follow this pattern: YYYY-MM-DD HH:MM");
+    }
+
+    if ($deadline !== null && date_format($date, self::DATE_FORMAT) !== $deadline) {
       throw new TaskException("Task deadline datetime error");
     }
 
     $this->_deadline = $deadline;
   }
 
-  public function setCompleted($completed) {
+  public function setCompleted(int $completed) {
     if(!is_numeric($completed) || ($completed !== 1 && $completed !== 0)) {
       throw new TaskException("Task completed must be 1 or 0");
     }
