@@ -72,7 +72,9 @@ if (array_key_exists("taskid", $_GET)) {
       break;
     }
     case 'PATCH': {
+      handleUpdateEntityRequest();
 
+      break;
     }
     default: {
       send405Response();
@@ -100,7 +102,7 @@ if (array_key_exists("taskid", $_GET)) {
 
 ########################
 
-function parseTasks($query) {
+function parseTasksToReturnData($query) {
   $tasks = array();
 
   while($row = $query->fetch(PDO::FETCH_ASSOC)) {
@@ -116,6 +118,33 @@ function parseTasks($query) {
   return $parsedData;
 }
 
+function getTaskByIDFromDB($taskID, $db) {
+  $query = $db->prepare('
+  SELECT id, title, description, DATE_FORMAT(deadline, "%Y-%m-%d %H:%i") as deadline, completed
+  FROM tbltasks
+  WHERE id = :taskID
+  ');
+  $query->bindParam(":taskID", $taskID, PDO::PARAM_INT);
+  $query->execute();
+
+  return $query;
+}
+
+function getRequestBodyAsJSON() {
+  if (!isset($_SERVER['CONTENT_TYPE']) || $_SERVER['CONTENT_TYPE'] !== 'application/json') {
+    send400Response("Content-Type header must be application/json");
+  }
+
+  $requestRawData = file_get_contents('php://input');
+  $requestJSONData = json_decode($requestRawData);
+
+  if (!$requestJSONData) {
+    send400Response("Request body is not valid JSON");
+  }
+
+  return $requestJSONData;
+}
+
 ####
 # -------------- GET SINGLE ENTITY HANDLER --------------
 ####
@@ -124,21 +153,15 @@ function handleGetEntityRequest() {
   global $readDB, $taskID;
 
   try {
-    $query = $readDB->prepare('
-    SELECT id, title, description, DATE_FORMAT(deadline, "%Y-%m-%d %H:%i") as deadline, completed
-    FROM tbltasks
-    WHERE id = :taskID
-    ');
-    $query->bindParam(':taskID', $taskID, PDO::PARAM_INT);
-    $query->execute();
+    $queryResult = getTaskByIDFromDB($taskID, $readDB);
 
-    $rowCount = $query->rowCount();
+    $rowCount = $queryResult->rowCount();
 
     if ($rowCount === 0) {
       send404Response("No entity with id $taskID found");
     }
 
-    $returnData = parseTasks($query);
+    $returnData = parseTasksToReturnData($queryResult);
 
     $successResponse = new Response(200, true, "Task retrieved successfully", $returnData);
     $successResponse->toCache(true);
@@ -158,16 +181,7 @@ function handleCreateEntityRequest() {
   global $writeDB;
 
   try {
-    if (!isset($_SERVER['CONTENT_TYPE']) || $_SERVER['CONTENT_TYPE'] !== 'application/json') {
-      send400Response("Content-Type header must be application/json");
-    }
-
-    $requestRawData = file_get_contents('php://input');
-    $requestJSONData = json_decode($requestRawData);
-
-    if (!$requestJSONData) {
-      send400Response("Request body is not valid JSON");
-    }
+    $requestJSONData = getRequestBodyAsJSON();
 
     if (!isset($requestJSONData->title)) {
       send400Response("Title is mandatory for task creation");
@@ -206,21 +220,15 @@ function handleCreateEntityRequest() {
 
     $lastTaskID = $writeDB->lastInsertId();
 
-    $query = $writeDB->prepare('
-    SELECT id, title, description, DATE_FORMAT(deadline, "%Y-%m-%d %H:%i") as deadline, completed
-    FROM tbltasks
-    WHERE id = :taskID
-    ');
-    $query->bindParam(':taskID', $lastTaskID, PDO::PARAM_INT);
-    $query->execute();
+    $queryResult = getTaskByIDFromDB($lastTaskID, $writeDB);
 
-    $rowCount = $query->rowCount();
+    $rowCount = $queryResult->rowCount();
 
     if ($rowCount === 0) {
       sendTaskControllerErrorResponse("Failed to retrieve task after creation");
     }
 
-    $returnData = parseTasks($query);
+    $returnData = parseTasksToReturnData($queryResult);
 
     $successResponse = new Response(201, true, "Task created successfully", $returnData);
     $successResponse->send();
@@ -228,6 +236,94 @@ function handleCreateEntityRequest() {
     sendDatabaseErrorResponse("Failed to create task: ".$ex, $ex);
   } catch (TaskException $ex) {
     sendTaskControllerErrorResponse("Failed to create task: ".$ex->getMessage());
+  }
+}
+
+####
+# -------------- UPDATE HANDLER --------------
+####
+
+function handleUpdateEntityRequest() {
+  global $writeDB, $taskID;
+
+  try {
+    $requestJSONData = getRequestBodyAsJSON();
+
+    $requestData = get_object_vars($requestJSONData);
+
+    if (array_key_exists("title", $requestData) && ($requestData["title"] === "" || $requestData["title"] === null)) {
+      send400Response("Title can't be empty");
+    }
+
+    $updatedStatuses = array(
+      "title" => false,
+      "description" => false,
+      "deadline" => false,
+      "completed" => false,
+    );
+
+    $queryFields = "";
+
+    foreach ($requestData as $key => $value) {
+      $updatedStatuses[$key] = true;
+
+      if ($key === "deadline") {
+        $queryFields .= "deadline = STR_TO_DATE(:deadline, '%Y-%m-%d %H:%i'), ";
+      } else {
+        $queryFields .= "$key = :$key, ";
+      }
+    }
+
+    $queryFields = rtrim($queryFields, ", ");
+
+    if (!in_array(true, $updatedStatuses)) {
+      send400Response("No fields to update were provided");
+    }
+
+    $queryResult = getTaskByIDFromDB($taskID, $writeDB);
+
+    if ($queryResult->rowCount() === 0) {
+      send404Response("No tasks with id $taskID were found");
+    }
+
+    $row = $queryResult->fetch(PDO::FETCH_ASSOC);
+
+    $queryString = $writeDB->prepare("UPDATE tbltasks SET ".$queryFields." WHERE id = :taskID");
+    $queryString->bindParam(":taskID", $taskID, PDO::PARAM_INT);
+
+    $newTaskValues = array(
+      'id' => $row['id'],
+    );
+
+    foreach ($updatedStatuses as $key => $updated) {
+      $newTaskValues[$key] = $updated ? $requestData[$key] : $row[$key];
+
+      if ($updated) {
+        $dataType = $key === 'completed' ? PDO::PARAM_INT : PDO::PARAM_STR;
+        $queryString->bindParam(":$key", $newTaskValues[$key], $dataType);
+      }
+    }
+
+    $queryString->execute();
+
+    if ($queryString->rowCount() === 0) {
+      sendTaskControllerErrorResponse("Failed to update task");
+    }
+
+    $queryResult = getTaskByIDFromDB($taskID, $writeDB);
+
+    if ($queryResult->rowCount() === 0) {
+      sendTaskControllerErrorResponse("Failed to retrieve task after update");
+    }
+
+    $returnData = parseTasksToReturnData($queryResult);
+
+    $successResponse = new Response(200, true, "Task updated successfully", $returnData);
+    $successResponse->send();
+  } catch (PDOException $ex) {
+    sendDatabaseErrorResponse("Failed to update task: ".$ex, $ex);
+  } catch (TaskException $ex) {
+    sendTaskControllerErrorResponse("Failed to update task: ".$ex->getMessage());
   }
 }
 
@@ -301,7 +397,7 @@ function handleGetListRequest(?int $page = null) {
     $query->execute();
     $rowCount = $query->rowCount();
 
-    $returnData = parseTasks($query);
+    $returnData = parseTasksToReturnData($query);
 
     if ($page !== null) {
       $returnData['total_rows'] = $tasksAmount;
@@ -346,7 +442,7 @@ function handleGetListByStatusRequest() {
 
       $rowCount = $query->rowCount();
 
-      $returnData = parseTasks($query);
+      $returnData = parseTasksToReturnData($query);
 
       $successResponse = new Response(200, true, "Tasks retrieved successfully", $returnData);
       $successResponse->toCache(true);
