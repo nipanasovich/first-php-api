@@ -8,10 +8,10 @@ class Response {
   private $_toCache = false;
   private $_responseData = array();
 
-  public function __construct($httpStatusCode, $success, $message, $data = null) {
+  public function __construct($httpStatusCode, $success, $message = null, $data = null) {
     $this->_success = $success;
     $this->_httpStatusCode = $httpStatusCode;
-    $this->_messages[] = $message;
+    ($message !== null && $this->_messages[] = $message);
     $this->_data = $data;
   }
 
